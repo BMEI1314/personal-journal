@@ -42,7 +42,7 @@ typedef enum TLocalIPStack {
     ELocalIPStack_Dual = 3,
 }danaipstack_type_t;
 
-static danaipstack_type_t dananet_family = ELocalIPStack_IPv4;
+static danaipstack_type_t dananet_family;
 
 static int _test_connect(int pf, struct sockaddr *addr, size_t addrlen) 
 {
@@ -87,15 +87,20 @@ bool checknetfamily()
     dananet_family = ELocalIPStack_None;
     int have_ipv4 = _have_ipv4();
     int have_ipv6 = _have_ipv6();
+   printf("%d\n",have_ipv6);
     if (have_ipv4) {
         dananet_family = ELocalIPStack_IPv4;      
-        return true;
+       // return true;
     }
     if (have_ipv6) {
         dananet_family = ELocalIPStack_IPv6;    
-        return true;
+       
     }
-    dananet_family = ELocalIPStack_IPv4;
+     if(have_ipv4&&have_ipv6)
+   {
+     dananet_family=ELocalIPStack_Dual;
+    }
+    //dananet_family = ELocalIPStack_IPv4;
     return true;
 
 }
@@ -251,7 +256,7 @@ static void ReplaceNat64WithV4IP(struct in6_addr* _replaced_nat64_addr, const st
 bool ConvertV4toNat64V6(const struct in_addr& _v4_addr, struct in6_addr& _v6_addr) {
     checknetfamily();
      printf("localIPstack is:%d\n",dananet_family);
-    if (ELocalIPStack_IPv6 != dananet_family) {
+    if (ELocalIPStack_IPv6 != dananet_family&&ELocalIPStack_Dual!=dananet_family) {
     	printf("Current Network is not ELocalIPStack_IPv6, no need GetNetworkNat64Prefix.\n");
 		return false;
     }
@@ -270,15 +275,17 @@ bool ConvertV4toNat64V6(const struct in_addr& _v4_addr, struct in6_addr& _v6_add
 		error = getaddrinfo(v4_ip, NULL, &hints, &res0);
 	} else {//lower than iOS9.2 or other platform
 #endif
-		error = getaddrinfo("ipv4only.arpa", NULL, &hints, &res0);
+	error = getaddrinfo("tv6.ustc.edu.cn", NULL, &hints, &res0);
+           printf("%d\n",error);
 #ifdef __APPLE__
 	}
 #endif
 	bool ret = false;
     if (error==0) {
+        printf("COMING\n");
     	for (res = res0; res; res = res->ai_next) {
     		char ip_buf[64] = {0};
-
+                  printf("haha\n");
     		if (AF_INET6 == res->ai_family) {
 #ifdef __APPLE__
 				if (publiccomponent_GetSystemVersion() >= 9.2f) { //higher than iOS9.2
@@ -288,8 +295,9 @@ bool ConvertV4toNat64V6(const struct in_addr& _v4_addr, struct in6_addr& _v6_add
 					break;
 				} else { //lower than iOS9.2 or other platform
 #endif
-
-	    			if (IsNat64AddrValid((struct in6_addr*)&(((sockaddr_in6*)res->ai_addr)->sin6_addr))) {
+                                   printf("haha1\n");
+	    			if (IsNat64AddrValid((struct in6_addr*)&(((sockaddr_in6*)res->ai_addr)->sin6_addr))==0) {
+                                                 printf("haha2\n");
 						ReplaceNat64WithV4IP((struct in6_addr*)&(((sockaddr_in6*)res->ai_addr)->sin6_addr) , &_v4_addr);
 						memcpy ( (char*)&_v6_addr, (char*)&((((sockaddr_in6*)res->ai_addr)->sin6_addr).s6_addr32), 16);
 						const char* ip_str = inet_ntop(AF_INET6, &_v6_addr, ip_buf, sizeof(ip_buf));
@@ -334,7 +342,7 @@ bool ConvertV4toNat64V6(const std::string& _v4_ip, std::string& _nat64_v6_ip) {
 	struct in6_addr v6_addr = {{{0}}};
 	if (ConvertV4toNat64V6(v4_addr, v6_addr)) {
 		
-            char v6_ip[64] = {0};
+                char v6_ip[64] = {0};
 		inet_ntop(AF_INET6, &v6_addr, v6_ip, sizeof(v6_ip));
 		_nat64_v6_ip = std::string(v6_ip);
 		return true;

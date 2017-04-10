@@ -13,7 +13,7 @@
 void   ipv4toipv6(char* ipv4,char* ipv6)
 {      struct in6_addr checkedipv6,pointer;
        struct in_addr ipv4ptr;
-       const char *ipv6_addr="2001:67c:27e4:642::"; // /96的前缀
+       const char *ipv6_addr="2001:67c:27e4:15::"; // /96的前缀
 	int i;
         inet_pton(AF_INET, ipv4, &ipv4ptr);
 	if (inet_pton(AF_INET6, ipv6_addr,&checkedipv6))
