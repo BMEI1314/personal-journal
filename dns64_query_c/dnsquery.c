@@ -1,15 +1,20 @@
-// Tencent is pleased to support the open source community by making Mars available.
-// Copyright (C) 2016 THL A29 Limited, a Tencent company. All rights reserved.
 
-// Licensed under the MIT License (the "License"); you may not use this file except in 
-// compliance with the License. You may obtain a copy of the License at
-// http://opensource.org/licenses/MIT
 
-// Unless required by applicable law or agreed to in writing, software distributed under the License is
-// distributed on an "AS IS" basis, WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND,
-// either express or implied. See the License for the specific language governing permissions and
-// limitations under the License.
-
+/* 
+ * ===================================================================================== 
+ * 
+ *       Filename:  dnsquery.c
+ * 
+ *    Description:  host为ipv4地址时，申请解析ipv4only.arpa的ip地址，判断前缀
+ * 
+ *        Version:  1.0 
+ *        Created:  2017.4.12
+ *       Revision:  none 
+ *       Compiler:  gcc 
+ *       Author:     Qi
+ * 
+ * ===================================================================================== 
+ */ 
 
 #include "dnsquery.h"
 
@@ -27,14 +32,18 @@
 #define NAME_SVR_LEN (40)
 
 // Type field of Query and Answer
-#define T_A         1       /* host address */
-#define T_NS        2       /* authoritative server */
-#define T_CNAME     5       /* canonical name */
-#define T_SOA       6       /* start of authority zone */
-#define T_PTR       12      /* domain name pointer */
-#define T_MX        15      /* mail routing information */
-
-namespace {
+#define A         1       /* host address */
+#define NS        2       /* authoritative server */
+#define CNAME     5       /* canonical name */
+#define SOA       6       /* start of authority zone */
+#define PTR       12      /* domain name pointer */
+#define MX        15      /* mail routing information */
+#define AAAA      0x1c
+#define min(a,b) ((a)<(b))?(a):(b)
+#define    false    0
+#define     true   1
+  
+typedef unsigned char   uint8_t; 
 // DNS header structure
 #pragma pack(push, 1)
 struct DNS_HEADER {
@@ -88,19 +97,38 @@ typedef struct {
     unsigned char*       name;
     struct QUESTION*     ques;
 } QUERY;
+static const uint8_t kWellKnownV4Addr1[4] = {192, 0, 0, 170};
+static const uint8_t kWellKnownV4Addr2[4] = {192, 0, 0, 171};
+static const uint8_t kOurDefineV4Addr[4] = {192, 0, 2, 1};
+//根据rfc6052，第64-72位必需为0;
+//insert 0 after first byte 
+static const uint8_t kWellKnownV4Addr1_index1[5] = {192, 0, 0, 0, 170};
+static const uint8_t kWellKnownV4Addr2_index1[5] = {192, 0, 0, 0, 171};
+static const uint8_t kOurDefineV4Addr_index1[5] = {192, 0, 0, 2, 1};
 
-}
+//insert 0 after second byte
+static const uint8_t kWellKnownV4Addr1_index2[5] = {192, 0, 0, 0, 170};
+static const uint8_t kWellKnownV4Addr2_index2[5] = {192, 0, 0, 0, 171};
+static const uint8_t kOurDefineV4Addr_index2[5] = {192, 0, 0, 2, 1};
+
+//insert 0 after third byte
+static const uint8_t kWellKnownV4Addr1_index3[5] = {192, 0, 0, 0, 170};
+static const uint8_t kWellKnownV4Addr2_index3[5] = {192, 0, 0, 0, 171};
+static const uint8_t kOurDefineV4Addr_index3[5] = {192, 0, 2, 0, 1};
+
+
 
 //函数原型声明
-static void           ChangetoDnsNameFormat(unsigned char*, std::string);
+int                   isValidIpv4Address(char* _ipaddress);
+static void           ChangetoDnsNameFormat(unsigned char*,char *);
 static unsigned char* ReadName(unsigned char*, unsigned char*, int*);
-static void           GetHostDnsServerIP(std::vector<std::string>& _dns_servers);
-static void           PrepareDnsQueryPacket(unsigned char* _buf, struct DNS_HEADER* _dns, unsigned char* _qname, const std::string& _host);
+static void           PrepareDnsQueryPacket(unsigned char* _buf, struct DNS_HEADER* _dns, unsigned char* _qname, char * _host);
 static void           ReadRecvAnswer(unsigned char* _buf, struct DNS_HEADER* _dns, unsigned char* _reader, struct RES_RECORD* _answers);
 static int            RecvWithinTime(int _fd, char* _buf, size_t _buf_n, struct sockaddr* _addr, socklen_t* _len, unsigned int _sec, unsigned _usec);
 static void           FreeAll(struct RES_RECORD* _answers);
-static bool           isValidIpAddress(const char* _ipaddress);
-
+static int            GetSuffixZeroCount(uint8_t* _buf, int _buf_len);
+static int            IsNat64AddrValid(struct in6_addr* _replaced_nat64_addr);
+static void           ReplaceNat64WithV4IP(struct in6_addr* _replaced_nat64_addr,struct in_addr* _v4_addr);
 /**
  *函数名:    socket_gethostbyname
  *功能: 输入域名，可得到该域名下所对应的IP地址列表
@@ -111,66 +139,182 @@ static bool           isValidIpAddress(const char* _ipaddress);
  *返回值:          当返回-1表示查询失败，当返回0则表示查询成功
  *
  */
-int socket_gethostbyname(const char* _host, socket_ipinfo_t* _ipinfo, int _timeout /*ms*/, const char* _dnsserver) {
+static int IsNat64AddrValid(struct in6_addr* _replaced_nat64_addr) {
+	int  suffix_zero_count = GetSuffixZeroCount((uint8_t*)_replaced_nat64_addr, sizeof(struct in6_addr));
+	int is_valid = false;
+
+	switch(suffix_zero_count) {
+		case 3:
+			//Pref64::/64
+			
+				if (0==memcmp(((uint8_t*)_replaced_nat64_addr)+9, kWellKnownV4Addr1, 4)
+					|| 0==memcmp(((uint8_t*)_replaced_nat64_addr)+9, kWellKnownV4Addr2, 4)) {
+					is_valid = true;
+				}
+			
+			break;
+		case 4:
+			//Pref64::/56
+			
+				if (0==memcmp(((uint8_t*)_replaced_nat64_addr)+7, kWellKnownV4Addr1_index1, 5)
+					|| 0==memcmp(((uint8_t*)_replaced_nat64_addr)+7, kWellKnownV4Addr2_index1, 5)) {
+					is_valid = true;
+				}
+			
+			break;
+		case 5:
+			//Pref64::/48
+			
+				if (0==memcmp(((uint8_t*)_replaced_nat64_addr)+6, kWellKnownV4Addr1_index2, 5)
+					|| 0==memcmp(((uint8_t*)_replaced_nat64_addr)+6, kWellKnownV4Addr2_index2, 5)) {
+					is_valid = true;
+				}
+			
+			break;
+		case 6:
+			//Pref64::/40
+			
+				if (0==memcmp(((uint8_t*)_replaced_nat64_addr)+5, kWellKnownV4Addr1_index3, 5)
+					|| 0==memcmp(((uint8_t*)_replaced_nat64_addr)+5, kWellKnownV4Addr2_index3, 5)) {
+					is_valid = true;
+				}
+			
+			break;
+		case 8: //7bytes suffix and 1 bytes u(RFC6052)
+			//Pref64::/32
+			
+				if (0==memcmp(((uint8_t*)_replaced_nat64_addr)+4, kWellKnownV4Addr1, 4)
+					|| 0==memcmp(((uint8_t*)_replaced_nat64_addr)+4, kWellKnownV4Addr2, 4)) {
+					is_valid = true;
+				}
+			
+			break;
+		case 0:
+			//Pref64::/96
+			if ((0==memcmp(((uint8_t*)_replaced_nat64_addr)+12, kWellKnownV4Addr1, 4))||( 0==memcmp(((uint8_t*)_replaced_nat64_addr)+12, kWellKnownV4Addr2, 4))) {
+					is_valid = true;
+				}
+			
+			break;
+		
+			
+	}
+	return true;
+}
+static void ReplaceNat64WithV4IP(struct in6_addr* _replaced_nat64_addr, struct in_addr* _v4_addr) {
+	int  suffix_zero_count = GetSuffixZeroCount((uint8_t*)_replaced_nat64_addr, sizeof(struct in6_addr));
+	uint8_t zero = (uint8_t)0;
+
+	switch(suffix_zero_count) {
+		case 3:
+			//Pref64::/64
+			memcpy(((uint8_t*)_replaced_nat64_addr)+9, (uint8_t*)_v4_addr, 4);
+			break;
+		case 4:
+			//Pref64::/56
+			memcpy(((uint8_t*)_replaced_nat64_addr)+7, (uint8_t*)_v4_addr, 1);
+			memcpy(((uint8_t*)_replaced_nat64_addr)+8, &zero, 1);
+			memcpy(((uint8_t*)_replaced_nat64_addr)+9, ((uint8_t*)_v4_addr)+1, 3);
+
+			break;
+		case 5:
+			//Pref64::/48
+			memcpy(((uint8_t*)_replaced_nat64_addr)+6, (uint8_t*)_v4_addr, 2);
+			memcpy(((uint8_t*)_replaced_nat64_addr)+8, &zero, 1);
+			memcpy(((uint8_t*)_replaced_nat64_addr)+9, ((uint8_t*)_v4_addr)+2, 2);
+			break;
+		case 6:
+			//Pref64::/40
+			memcpy(((uint8_t*)_replaced_nat64_addr)+5, (uint8_t*)_v4_addr, 3);
+			memcpy(((uint8_t*)_replaced_nat64_addr)+8, &zero, 1);
+			memcpy(((uint8_t*)_replaced_nat64_addr)+9, ((uint8_t*)_v4_addr)+3, 1);
+			break;
+		case 8:
+			//Pref64::/32
+			memcpy(((uint8_t*)_replaced_nat64_addr)+4, (uint8_t*)_v4_addr, 4);
+			break;
+		case 0:
+			//Pref64::/96
+			memcpy(((uint8_t*)_replaced_nat64_addr)+12, (uint8_t*)_v4_addr, 4);
+			break;
+		default:
+			memcpy(((uint8_t*)_replaced_nat64_addr)+12, (uint8_t*)_v4_addr, 4);
+			
+	}
+}
+
+static int GetSuffixZeroCount(uint8_t* _buf, int _buf_len) {
+	int zero_count = 0;
+	for(int i=0; i<_buf_len; i++) {
+		if ((uint8_t)0==_buf[_buf_len-1-i])
+			zero_count++;
+		else
+			break;
+
+	}
+	return zero_count;
+}
+
+int getaddrinfo_v6(const char* _host, struct socket_ipinfo_t* _ipinfo, int _timeout /*ms*/, const char* _dnsserver) 
+{   int re=0;
+    char *host=_host;
+   if(isValidIpv4Address(host))//输入的是ipv4地址 
+    {  
+      struct in_addr _v4_addr = {0};
+      inet_pton(AF_INET,host,&_v4_addr);
+      char ipv4_host[20]="ipv4only.arpa";
+      if(socket_gethostbyname(ipv4_host,_ipinfo, _timeout, _dnsserver)!=0) return -1; 
+   
+      _ipinfo->size=1; 
+
+       if(IsNat64AddrValid(&(_ipinfo->v6_addr[0]))==true) {
+						ReplaceNat64WithV4IP((&_ipinfo->v6_addr[0]) , &_v4_addr);
+						
+		    			return 0;
+	    			} else {
+	    			
+	    				return -1;
+	    			}
+      
+    } 
+ else 
+   re=socket_gethostbyname(host,_ipinfo,_timeout,_dnsserver);
+  return re;
+}
+int socket_gethostbyname(char* _host, struct socket_ipinfo_t* _ipinfo, int _timeout /*ms*/, const char* _dnsserver) {
    
     if (NULL == _host) return -1;
 
     if (NULL == _ipinfo) return -1;
-
+    if(NULL==_dnsserver) return -1;
     if (_timeout <= 0) _timeout = DEFAULT_TIMEOUT;
-
-    std::vector<std::string> dns_servers;
-
-    if (_dnsserver && isValidIpAddress(_dnsserver)) {
-       
-        dns_servers.push_back(_dnsserver);
-    } else {
-       
-        GetHostDnsServerIP(dns_servers);
-    }
-      int sockfd = socket(AF_INET6,SOCK_DGRAM,IPPROTO_UDP);
-      /*
-   socket(AF_INET, SOCK_DGRAM, IPPROTO_UDP);  // UDP packet for DNS queries
-       if (sock < 0) {
-        return -1;
-    }*/   
+    int sockfd = socket(AF_INET6,SOCK_DGRAM,IPPROTO_UDP); 
     if (sockfd  < 0) 
-	    { //printf("sockfd:%d\n",sockfd);  
-                 // IPv6
-		exit(-1);  
+	    { 
+		return -1;  
 	    }  
       printf("sockfd:%d\n",sockfd);
-
-    if (dns_servers.empty()) {
-        
-        close(sockfd);
-        return -1;
-    }
-   // std::vector<std::string>::iterator iter = dns_servers.begin();//设置dns服务器ip容器
-    // 配置DNS服务器的IP和端口号
-    //dest = *(struct sockaddr_in*)(&socket_address((*iter).c_str(), DNS_PORT).address());
-    //dest = *(struct sockaddr_in6*)(&socket_address((*iter).c_str(), DNS_PORT).address());
     struct sockaddr_in6 dest = {0};
     dest.sin6_family = AF_INET6;
     inet_pton(AF_INET6, _dnsserver, &(dest.sin6_addr)); 
      dest.sin6_port = htons(DNS_PORT);
     struct RES_RECORD answers[SOCKET_MAX_IP_COUNT];  // the replies from the DNS server
-    memset(answers, 0, sizeof(RES_RECORD)*SOCKET_MAX_IP_COUNT);
+    memset(answers, 0, sizeof(struct RES_RECORD)*SOCKET_MAX_IP_COUNT);
 
     int ret = -1;
 
     do {
-        const unsigned int BUF_LEN = 65536;
-        unsigned char send_buf[BUF_LEN] = {0};
-        unsigned char recv_buf[BUF_LEN] = {0};
+         unsigned int BUF_LEN=65536;
+        unsigned char send_buf[65536] = {0};
+        unsigned char recv_buf[65536] = {0};//C99标准引入了变长数组，它允许使用变量定义数组各维。变长数组必须是自动存储类，而且声明时不可以进行初始化。
         struct DNS_HEADER* dns = (struct DNS_HEADER*)send_buf;
         unsigned char* qname = (unsigned char*)&send_buf[sizeof(struct DNS_HEADER)];
         PrepareDnsQueryPacket(send_buf, dns, qname, _host);
         unsigned long send_packlen = sizeof(struct DNS_HEADER) + (strlen((const char*)qname) + 1) + sizeof(struct QUESTION);
-
-   
-     int sendfd = sendto(sockfd, (char*)send_buf, send_packlen, 0, (struct sockaddr*)&dest, sizeof(dest));
-      printf("sendlen:%d\n",sendfd);
+      int sendfd;
+      for(int i=0;i<3;i++)
+      {sendfd = sendto(sockfd, (char*)send_buf, send_packlen, 0, (struct sockaddr*)&dest, sizeof(dest));}
+      printf("sendPacketlen:%d\n",sendfd);
         if (sendfd==-1)
         {  
             break;
@@ -181,13 +325,14 @@ int socket_gethostbyname(const char* _host, socket_ipinfo_t* _ipinfo, int _timeo
         socklen_t recv_src_len = sizeof(recv_src);
 
         int recvPacketLen = 0;
-
-        if ((recvPacketLen = RecvWithinTime(sockfd, (char*)recv_buf, BUF_LEN, (struct sockaddr*)&recv_src, &recv_src_len, _timeout / 1000, (_timeout % 1000) * 1000)) == -1) {
-           
+         int temp=3;
+         while(--temp)
+      {         if ((recvPacketLen = RecvWithinTime(sockfd, (char*)recv_buf, BUF_LEN, (struct sockaddr*)&recv_src, &recv_src_len, _timeout / 1000, (_timeout % 1000) * 1000)) > -1) {
+            
             break;
         }
-  
-    printf("recvPacketLen:%d\n",recvPacketLen);
+      }
+        printf("recvPacketLen:%d\n",recvPacketLen);
   
   
         // move ahead of the dns header and the query field
@@ -196,30 +341,26 @@ int socket_gethostbyname(const char* _host, socket_ipinfo_t* _ipinfo, int _timeo
         ReadRecvAnswer(recv_buf, dns, reader, answers);
 
         // 把查询到的IP放入返回参数_ipinfo结构体中
-        int answer_count = std::min(SOCKET_MAX_IP_COUNT, (int)ntohs(dns->ans_count));
+        int answer_count = min(SOCKET_MAX_IP_COUNT, (int)ntohs(dns->ans_count));
         _ipinfo->size = 0;
          for (int i = 0; i < answer_count; ++i) {
-            if (0x1c == ntohs(answers[i].resource->type)) {  // IPv6 address
-                              //  answers[i].rdata;
-                    //char v6_ip[64] = {0};
-		//inet_ntop(AF_INET6, &v6_addr, v6_ip, sizeof(v6_ip));
-		//_nat64_v6_ip = std::string(v6_ip);
-              std::string v6_addr;
+            if (AAAA == ntohs(answers[i].resource->type)) {  // IPv6 address
+                              
+              
               for(int p=0;p<16;p++)
-            {  printf("-----%02x-----\n",answers[i].rdata[p]);
-               //v6_addr+=atoi(answers[i].rdata[p];
+            {  _ipinfo->v6_addr[_ipinfo->size].s6_addr[p]=answers[i].rdata[p];
+               
             }
-               // _ipinfo->v6_addr[_ipinfo->size].s6_addr = (*p);  // working without ntohl
+          
                 _ipinfo->size++;
             }
         }
 
-        if (0 >= _ipinfo->size) {  // unkown host, dns->rcode == 3
+        if (0 >= _ipinfo->size) {  
            
             break;
         }
 
-        //      _ipinfo->dns = ;
         ret = 0;
     } while (false);
 
@@ -229,10 +370,12 @@ int socket_gethostbyname(const char* _host, socket_ipinfo_t* _ipinfo, int _timeo
     return ret;  //* 查询DNS服务器超时
 }
 
-bool isValidIpAddress(const char* _ipaddress) {
-    struct sockaddr_in6 sa;
 
-    int result =inet_pton(AF_INET6, _ipaddress, (void*) & (sa.sin6_addr));
+
+int isValidIpv4Address(char* _ipaddress) {
+   
+    struct sockaddr_in sa;
+    int result =inet_pton(AF_INET, _ipaddress, (void*) & (sa.sin_addr));
     return result != 0;
 }
 
@@ -251,7 +394,7 @@ void FreeAll(struct RES_RECORD* _answers) {
 void ReadRecvAnswer(unsigned char* _buf, struct DNS_HEADER* _dns, unsigned char* _reader, struct RES_RECORD* _answers) {
     // reading answers
     int i, j, stop = 0;
-    int answer_count = std::min(SOCKET_MAX_IP_COUNT, (int)ntohs(_dns->ans_count));
+    int answer_count =min(SOCKET_MAX_IP_COUNT, (int)ntohs(_dns->ans_count));
 
     for (i = 0; i < answer_count; i++) {
         _answers[i].name = ReadName(_reader, _buf, &stop);
@@ -261,7 +404,7 @@ void ReadRecvAnswer(unsigned char* _buf, struct DNS_HEADER* _dns, unsigned char*
         _reader = _reader + sizeof(struct R_DATA);//指针偏移
 
        // if (ntohs(_answers[i].resource->type) == 1) {  // if its an ipv4 address
-         if (ntohs(_answers[i].resource->type) == 0x1c) {  // if its an ipv6 address
+         if (ntohs(_answers[i].resource->type) == AAAA) {  // if its an ipv6 address
            _answers[i].rdata = (unsigned char*)malloc(ntohs(_answers[i].resource->data_len));
           
             if (NULL == _answers[i].rdata) 
@@ -271,9 +414,9 @@ void ReadRecvAnswer(unsigned char* _buf, struct DNS_HEADER* _dns, unsigned char*
 
             for (j = 0 ; j < ntohs(_answers[i].resource->data_len) ; j++)
                 { _answers[i].rdata[j] = _reader[j];
-                  printf("%x ",_reader[j]);
+                  
              }
-              printf("\n");
+            
             _answers[i].rdata[ntohs(_answers[i].resource->data_len)] = '\0';
             _reader = _reader + ntohs(_answers[i].resource->data_len);
         } else {
@@ -350,10 +493,10 @@ unsigned char* ReadName(unsigned char* _reader, unsigned char* _buffer, int* _co
 }
 
 // this will convert www.google.com to 3www6google3com
-void ChangetoDnsNameFormat(unsigned char* _qname, std::string _hostname) {
+void ChangetoDnsNameFormat(unsigned char* _qname, char* _hostname) {
     int lock = 0 , i;
-    _hostname.append(".");
-    const char* host = _hostname.c_str();
+    strncat(_hostname,".",1);
+    const char* host = _hostname;
 
     for (i = 0; i < (int)strlen(host); i++) {
         if (host[i] == '.') {
@@ -370,7 +513,7 @@ void ChangetoDnsNameFormat(unsigned char* _qname, std::string _hostname) {
     *_qname++ = '\0';
 }
 
-void PrepareDnsQueryPacket(unsigned char* _buf, struct DNS_HEADER* _dns, unsigned char* _qname, const std::string& _host) {
+void PrepareDnsQueryPacket(unsigned char* _buf, struct DNS_HEADER* _dns, unsigned char* _qname,  char* _host) {
     struct QUESTION*  qinfo = NULL;
     // Set the DNS structure to standard queries
     _dns->id = getpid();
@@ -393,8 +536,8 @@ void PrepareDnsQueryPacket(unsigned char* _buf, struct DNS_HEADER* _dns, unsigne
     ChangetoDnsNameFormat(_qname, _host);  // 将传入的域名host转换为标准的DNS报文可用的格式，存入qname中
     qinfo = (struct QUESTION*)&_buf[sizeof(struct DNS_HEADER) + (strlen((const char*)_qname) + 1)];  // fill it
 
-    //qinfo->qtype = htons(0x1c);  //只查询 ipv4 address
-    qinfo->qtype = htons(0x1c);  //查询 ipv6 address
+  
+    qinfo->qtype = htons(AAAA);  //查询 ipv6 address
     qinfo->qclass = htons(1);  // its internet
 }
 
@@ -440,104 +583,5 @@ label:
     return -1;  // 超时或者select失败
 }
 
-#ifdef ANDROID
 
-#include <sys/system_properties.h>
-void GetHostDnsServerIP(std::vector<std::string>& _dns_servers) {
-    char buf1[PROP_VALUE_MAX];
-    char buf2[PROP_VALUE_MAX];
-    __system_property_get("net.dns1", buf1);
-    __system_property_get("net.dns2", buf2);
-    _dns_servers.push_back(std::string(buf1));  // 主DNS
-    _dns_servers.push_back(std::string(buf2));  // 备DNS
-
-}
-
-#elif defined __APPLE__ 
-#include <TargetConditionals.h>
-#include <resolv.h>
-#define RESOLV_CONFIG_PATH ("/etc/resolv.conf")
-#if TARGET_OS_IPHONE
-void GetHostDnsServerIP(std::vector<std::string>& _dns_servers) {
-	_dns_servers.clear();
-    std::ifstream fin(RESOLV_CONFIG_PATH);
-
-    const int LINE_LENGTH = 256;
-    char str[LINE_LENGTH];
-
-    if (fin.good()) {
-        while (!fin.eof()) {
-            if (fin.getline(str, LINE_LENGTH).good()) {
-                std::string s(str);
-                int num = (int)s.find(NAME_SVR, 0);
-
-                if (num >= 0) {
-                    s.erase(std::remove_if(s.begin(), s.end(), isspace), s.end());
-                    s = s.erase(0, NAME_SVR_LEN);
-                    _dns_servers.push_back(s);
-                }
-            } else {
-                break;
-            }
-        }
-    } else {
-        //  /etc/resolv.conf 不存在
-        struct __res_state stat = {0};
-        res_ninit(&stat);
-
-//        if (stat.nsaddr_list != 0) {
-            struct sockaddr_in nsaddr;
-
-            for (int i = 0; i < stat.nscount; i++) {
-                nsaddr = stat.nsaddr_list[i];
-                const char* nsIP = socket_address(nsaddr).ip();
-
-                if (NULL != nsIP)
-                	_dns_servers.push_back(std::string(nsIP));
-            }
-//        }
-
-        res_ndestroy(&stat);
-    }
-}
-#else
-void GetHostDnsServerIP(std::vector<std::string>& _dns_servers)
-{
-    //EMPTY FOR MAC
-}
-#endif //endif TARGET_OS_IPHONE
-#elif defined WP8
-void GetHostDnsServerIP(std::vector<std::string>& _dns_servers) {
-}
-#elif defined _WIN32
-#include <stdio.h>
-#include <windows.h>
-#include <Iphlpapi.h>
-
-#pragma comment(lib, "Iphlpapi.lib")
-
-void GetHostDnsServerIP(std::vector<std::string>& _dns_servers) {
-    FIXED_INFO fi;
-    ULONG ulOutBufLen = sizeof(fi);
-
-    if (::GetNetworkParams(&fi, &ulOutBufLen) != ERROR_SUCCESS) {
-
-        return;
-    }
-
-    IP_ADDR_STRING* pIPAddr = fi.DnsServerList.Next;
-
-    while (pIPAddr != NULL) {
-    	_dns_servers.push_back(pIPAddr->IpAddress.String);
-        pIPAddr = pIPAddr->Next;
-    }
-
-    return;
-}
-#else
-
-void GetHostDnsServerIP(std::vector<std::string>& _dns_servers) {
-}
-
-#endif
 

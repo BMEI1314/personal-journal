@@ -50,21 +50,19 @@ extern "C"{
 struct socket_ipinfo_t
 {
     int  size;
-//    int  cost;
-//    struct  in_addr dns;
+
     struct  in6_addr v6_addr[SOCKET_MAX_IP_COUNT];
+    struct  in_addr v4_addr[SOCKET_MAX_IP_COUNT];
 };
-
-int socket_gethostbyname(const char* _host, struct socket_ipinfo_t* _ipinfo, int _timeout /*ms*/, const char* _dnsserver);
-
-
+bool checknetfamily();
+int socketv4_gethostbyname(const char* _host, struct socket_ipinfo_t* _ipinfo, int _timeout /*ms*/, const char* _dnsserver);
+int socketv6_gethostbyname(const char* _host, struct socket_ipinfo_t* _ipinfo, int _timeout /*ms*/, const char* _dnsserver);
+void socket_gethostbyname(const char* _host, socket_ipinfo_t* _ipinfo, int _timeout /*ms*/, const char* _dnsserver);
 #ifdef __cplusplus
 }
 
 
-////////
-class NetCheckTrafficMonitor;
-int socket_gethostbyname(const char* _host, struct socket_ipinfo_t* _ipinfo, int _timeout /*ms*/, const char* _dnsserver, NetCheckTrafficMonitor* _traffic_monitor);
+
 #endif
 
 #endif //SDT_SRC_CHECKIMPL_DNSQUERY_H_

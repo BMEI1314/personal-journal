@@ -40,9 +40,9 @@ typedef enum TLocalIPStack {
     ELocalIPStack_IPv4 = 1,
     ELocalIPStack_IPv6 = 2,
     ELocalIPStack_Dual = 3,
-}danaipstack_type_t;
+}ipstack_type_t;
 
-static danaipstack_type_t dananet_family;
+static ipstack_type_t net_family;
 
 static int _test_connect(int pf, struct sockaddr *addr, size_t addrlen) 
 {
@@ -84,21 +84,21 @@ static int _have_ipv4()
 }
 bool checknetfamily()
 {
-    dananet_family = ELocalIPStack_None;
+    net_family = ELocalIPStack_None;
     int have_ipv4 = _have_ipv4();
     int have_ipv6 = _have_ipv6();
    printf("%d\n",have_ipv6);
     if (have_ipv4) {
-        dananet_family = ELocalIPStack_IPv4;      
+        net_family = ELocalIPStack_IPv4;      
        // return true;
     }
     if (have_ipv6) {
-        dananet_family = ELocalIPStack_IPv6;    
+        net_family = ELocalIPStack_IPv6;    
        
     }
      if(have_ipv4&&have_ipv6)
    {
-     dananet_family=ELocalIPStack_Dual;
+     net_family=ELocalIPStack_Dual;
     }
     //dananet_family = ELocalIPStack_IPv4;
     return true;
