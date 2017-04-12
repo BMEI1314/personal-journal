@@ -1,19 +1,21 @@
-// Tencent is pleased to support the open source community by making Mars available.
-// Copyright (C) 2016 THL A29 Limited, a Tencent company. All rights reserved.
 
-// Licensed under the MIT License (the "License"); you may not use this file except in 
-// compliance with the License. You may obtain a copy of the License at
-// http://opensource.org/licenses/MIT
-
-// Unless required by applicable law or agreed to in writing, software distributed under the License is
-// distributed on an "AS IS" basis, WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND,
-// either express or implied. See the License for the specific language governing permissions and
-// limitations under the License.
-
-
-
-#ifndef SDT_SRC_CHECKIMPL_DNSQUERY_H_
-#define SDT_SRC_CHECKIMPL_DNSQUERY_H_
+/* 
+ * ===================================================================================== 
+ * 
+ *       Filename:  dnsquery.h 
+ * 
+ *    Description:  1.重组dns报文,解析dns报文.2支持ipv6，ipv4 3.发包收包循环3次4.检测自己的ip—stack  
+ * 
+ *        Version:  参照微信mars实现
+ *        Created:  2017年04月01日
+ *       Revision:  none 
+ *       Compiler:  g++ 
+ *       Author:  Qi    
+ * 
+ * ===================================================================================== 
+ */ 
+#ifndef DNSQUERY_H_
+#define DNSQUERY_H_
 
 #include <stdlib.h>
 #include <string.h>
@@ -65,6 +67,6 @@ void socket_gethostbyname(const char* _host, socket_ipinfo_t* _ipinfo, int _time
 
 #endif
 
-#endif //SDT_SRC_CHECKIMPL_DNSQUERY_H_
+#endif 
 
 

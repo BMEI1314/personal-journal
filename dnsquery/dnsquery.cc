@@ -6,7 +6,7 @@
  * 
  *    Description:  1.重组dns报文,解析dns报文.2支持ipv6，ipv4 3.发包收包循环3次4.检测自己的ip—stack  
  * 
- *        Version:  1.0 
+ *        Version:  参照微信mars实现
  *        Created:  2017年04月01日
  *       Revision:  none 
  *       Compiler:  g++ 
