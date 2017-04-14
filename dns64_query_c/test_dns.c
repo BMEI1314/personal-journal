@@ -1,9 +1,15 @@
 
 #include "dnsquery.h"
-int main()
-{
+int main(int argc,char **argv)
+{ 
+ if(argc<=1)
+ {    
+    printf("eg:./a.out demain(or ip)\n");
+  return -1;
+}
+
  struct socket_ipinfo_t *test_ipv6=(struct socket_ipinfo_t *)malloc(sizeof(socket_ipinfo_t));
-   char host[64]="192.168.0.2";
+   char *host=argv[1];
   char dnsserver1[64]="2001:67c:27e4:15::64";
  char dnsserver2[64]="2001:67c:27e4::60";
   char v6_ip[64] = {0};
@@ -15,6 +21,5 @@ int main()
      printf("%s\n",v6_ip);
   }
 free(test_ipv6);
-
-return 0;
+  return 0;
 }
