@@ -1,8 +1,5 @@
-
-
 #ifndef DNSQUERY_H_
 #define DNSQUERY_H_
-
 #include <stdlib.h>
 #include <string.h>
 #include <ctype.h>
@@ -15,11 +12,8 @@
 #include <stdio.h>
 #include <pthread.h>
 #include <string.h>
+//#include <algorithm>
 #include <errno.h>
-
-
-
-
 /**
  *函数名:    socket_gethostbyname
  *功能: 输入域名，可得到该域名下所对应的IP地址列表
@@ -31,7 +25,6 @@
  *
  */
 #define SOCKET_MAX_IP_COUNT (20)
-
 struct socket_ipinfo_t
 {
     int  size;
@@ -39,12 +32,8 @@ struct socket_ipinfo_t
 //    struct  in_addr dns;
     struct  in6_addr v6_addr[20];
 }socket_ipinfo_t;
-
 int socket_gethostbyname(char* _host, struct socket_ipinfo_t* _ipinfo, int _timeout /*ms*/, const char* _dnsserver);
-
 int getaddrinfo_v6(const char* _host, struct socket_ipinfo_t* _ipinfo, int _timeout /*ms*/);
-int multi_pthread_getaddrinfo(const char* _host, struct socket_ipinfo_t* _ipinfo, int _timeout /*ms*/)
-
 #endif 
 
 

@@ -43,8 +43,9 @@ struct socket_ipinfo_t
 
 int socket_gethostbyname(char* _host, struct socket_ipinfo_t* _ipinfo, int _timeout /*ms*/, const char* _dnsserver);
 
-int getaddrinfo_v6(char* _host, struct socket_ipinfo_t* _ipinfo, int _timeout /*ms*/);
+int getaddrinfo_v6(const char* _host, struct socket_ipinfo_t* _ipinfo, int _timeout /*ms*/);
 
+static int isValidIpv4Address(char* _ipaddress);
 
 #endif 
 

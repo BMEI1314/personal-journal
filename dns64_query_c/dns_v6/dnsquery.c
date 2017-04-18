@@ -3,11 +3,15 @@
  * 
  *       Filename:  dnsquery.c
  * 
- *    Description:  host为ipv4地址时，申请解析ipv4only.arpa的ip地址，判断前缀
+ *    Description: 对外层接口:getaddrinfo_v6()
+ *                   1.host输入为ipv4地址时，申请解析ipv4only.arpa的ip地址，判断前缀-提取前缀合成
+ *                   2.host输入为域名时，首先通过自己实现的getaddrinfo，如果返回失败，再调用系统api getaddrinfo    
+ *                 内部:th_gethostbyname()，解析地址
+ *                   1.现在只知道3个dns64服务器的地址，开3个线程解析地址，某线程首先获取到该域名下所对应的IP地址列表即返回
+ *
  * 
  *        Version:  1.0 
- *        Created:  
- *       Revision:  none 
+ *        Created:  2017/04.17
  *       Compiler:  gcc 
  *       Author:    ZQ
  * 
@@ -16,15 +20,11 @@
 
 #include "dnsquery.h"
 
-
-#if defined __APPLE__
-#include <fstream>
-#endif
-
 #define TRAFFIC_LIMIT_RET_CODE (INT_MIN)
 #define DNS_PORT (53)
 #define DEFAULT_TIMEOUT (3000)
-
+#define NAME_SVR ("nameserver")
+#define NAME_SVR_LEN (40)
 
 // Type field of Query and Answer
 #define A         1       /* host address */
@@ -37,8 +37,7 @@
 #define min(a,b) ((a)<(b))?(a):(b)
 #define    false    0
 #define     true   1
-
-
+#define   dbg   printf
 typedef unsigned char   uint8_t; 
 // DNS header structure
 #pragma pack(push, 1)
@@ -63,8 +62,17 @@ struct DNS_HEADER {
     unsigned    short add_count;    // number of resource entries
 };
 
-
-
+static pthread_mutex_t dnsquery_mutex,dnsquery_mutex1;
+//static pthread_cond_t cond = PTHREAD_COND_INITIALIZER;
+static int DNS64SERVERNUM =3;
+static  int dnsquery_failcount=0;
+struct multi_dns
+{
+  const char* _host;
+  struct socket_ipinfo_t* _ipinfo;
+  int _timeout;
+   const char *_dnsserver;
+};
 // Constant sized fields of query structure
 struct QUESTION {
     unsigned short qtype;
@@ -101,18 +109,19 @@ static const uint8_t kOurDefineV4Addr[4] = {192, 0, 2, 1};
 static const uint8_t kWellKnownV4Addr1_index1[5] = {192, 0, 0, 0, 170};
 static const uint8_t kWellKnownV4Addr2_index1[5] = {192, 0, 0, 0, 171};
 static const uint8_t kOurDefineV4Addr_index1[5] = {192, 0, 0, 2, 1};
+
 //insert 0 after second byte
 static const uint8_t kWellKnownV4Addr1_index2[5] = {192, 0, 0, 0, 170};
 static const uint8_t kWellKnownV4Addr2_index2[5] = {192, 0, 0, 0, 171};
 static const uint8_t kOurDefineV4Addr_index2[5] = {192, 0, 0, 2, 1};
+
 //insert 0 after third byte
 static const uint8_t kWellKnownV4Addr1_index3[5] = {192, 0, 0, 0, 170};
 static const uint8_t kWellKnownV4Addr2_index3[5] = {192, 0, 0, 0, 171};
 static const uint8_t kOurDefineV4Addr_index3[5] = {192, 0, 2, 0, 1};
-//函数原型声明
 
-static pthread_mutex_t mutex; 
-int                   isValidIpv4Address(char* _ipaddress);
+//函数原型声明
+static int            isValidIpv4Address(char* _ipaddress);
 static void           ChangetoDnsNameFormat(unsigned char*,char *);
 static unsigned char* ReadName(unsigned char*, unsigned char*, int*);
 static void           PrepareDnsQueryPacket(unsigned char* _buf, struct DNS_HEADER* _dns, unsigned char* _qname, char * _host);
@@ -210,9 +219,9 @@ static void ReplaceNat64WithV4IP(struct in6_addr* _replaced_nat64_addr, struct i
 			break;
 		case 6:
 			//Pref64::/40
-			memcpy(((uint8_t*)_replaced_nat64_addr)+5, (uint8_t*)_v4_addr,3);
+			memcpy(((uint8_t*)_replaced_nat64_addr)+5, (uint8_t*)_v4_addr, 3);
 			memcpy(((uint8_t*)_replaced_nat64_addr)+8, &zero, 1);
-			memcpy(((uint8_t*)_replaced_nat64_addr)+9, ((uint8_t*)_v4_addr)+3,1);
+			memcpy(((uint8_t*)_replaced_nat64_addr)+9, ((uint8_t*)_v4_addr)+3, 1);
 			break;
 		case 8:
 			//Pref64::/32
@@ -232,7 +241,7 @@ static int GetSuffixZeroCount(uint8_t* _buf, int _buf_len) {
 	int zero_count = 0;
 	for(int i=0; i<_buf_len; i++) {
 		if ((uint8_t)0==_buf[_buf_len-1-i])
- 			zero_count++;
+			zero_count++;
 		else
 			break;
 
@@ -240,7 +249,7 @@ static int GetSuffixZeroCount(uint8_t* _buf, int _buf_len) {
 	return zero_count;
 }
 static int getaddrinfo_api(char *_host,struct socket_ipinfo_t* _ipinfo)
-{
+{ 
   struct addrinfo hints, *res=NULL, *res0=NULL;
    int error = 0;
    int ret = -1;
@@ -249,67 +258,112 @@ static int getaddrinfo_api(char *_host,struct socket_ipinfo_t* _ipinfo)
    hints.ai_socktype = SOCK_STREAM;
    hints.ai_flags = AI_ADDRCONFIG;
    error = getaddrinfo(_host, NULL, &hints, &res0);
-    pthread_mutex_lock(&mutex);  
     if (error==0) {
-       _ipinfo->size=0;
+        
     	for (res = res0; res; res = res->ai_next) {
     		char ip_buf[64] = {0};
-            if (AF_INET6 == res->ai_family) { 
+
+            if (AF_INET6 == res->ai_family) {
+
                 memcpy ( (char*)&(_ipinfo->v6_addr[_ipinfo->size].s6_addr32), (char*)&((((struct sockaddr_in6*)res->ai_addr)->sin6_addr).s6_addr32), 12);
                 //_ipinfo->v6_addr[_ipinfo->size]=res->ai_addr->s6_addr;
                 _ipinfo->size+=1;
+      
                 ret = 0;
                 break;
             }
     		else {
+    			
     			ret = -1;
-    		     }
+    		}
+
     	}
-    } else {
-   	
+
+    } else {	
     	ret = -1;
     }
-pthread_mutex_unlock(&mutex); 
-    freeaddrinfo(res0);
+   freeaddrinfo(res0);
    return ret;
 }
 
-int multi_pthread_getaddrinfo(const char* _host, struct socket_ipinfo_t* _ipinfo, int _timeout /*ms*/)
-{   
-         
-	   pthread_t dnsserver1,dnsserver2,dnsserver3;
-           pthread_mutex_init(&mutex,NULL);
-           char* _dnsserver  = "2001:67c:27e4:15::64";
-	   if(pthread_create(dnsserver1,NULL,getaddrinfo_v6,NULL))
-           {      
-            dbg("[%s] -- [%d] -- pthread_create failed\r\n", __FUNCTION__, __LINE__);   
-                  return -1;
-            }
-	   * _dnsserver = "2001:67c:27e4:15::6411";
-           if(pthread_create(dnsserver2,NULL,getaddrinfo_v6,NULL))
-           {      
-            dbg("[%s] -- [%d] -- pthread_create failed\r\n", __FUNCTION__, __LINE__);   
-                  return -1;
-            }
-           * _dnsserver = "2001:67c:27e4::60";
-           if(pthread_create(dnsserver3,NULL,getaddrinfo_v6,NULL))
-           {      
-            dbg("[%s] -- [%d] -- pthread_create failed\r\n", __FUNCTION__, __LINE__);   
-                  return -1;
-            }
-        while(1)
-    {
-       if(_ipinfo->v6_addr!=NULL)  return 0; 
-    }
 
+void *th_socket_gethostbyname(void *data) {
+  dbg("[%s] -- [%d] -- th_socket_gethostbyname enter\r\n", __FUNCTION__, __LINE__);
+    struct multi_dns *tmp = (struct multi_dns *)data;
+   if(socket_gethostbyname(tmp->_host,tmp->_ipinfo,tmp->_timeout,tmp->_dnsserver)==-1)
+     {
+      pthread_mutex_lock(&dnsquery_mutex1);
+      dnsquery_failcount++;
+      pthread_mutex_unlock(&dnsquery_mutex1);
+     }
+ dbg("[%s] -- [%d] -- th_socket_gethostbyname out \r\n", __FUNCTION__, __LINE__);
+}
+static int th_gethostbyname(char* _host, struct socket_ipinfo_t* _ipinfo, int _timeout /*ms*/)
+{    
+      int ret=-1;
+      dbg("[%s] -- [%d] -- th_gethostbyname enter\r\n", __FUNCTION__, __LINE__);  
+          struct multi_dns *data=(struct multi_dns *)malloc(sizeof(struct multi_dns));
+	   pthread_t dnsserver1,dnsserver2,dnsserver3;
+           pthread_mutex_init(&dnsquery_mutex,NULL);
+           pthread_mutex_init(&dnsquery_mutex1,NULL);
+           data->_host=_host;
+           data->_ipinfo=_ipinfo;
+           data->_timeout=_timeout;
+           data->_dnsserver  = "2001:67c:27e4:15::64";
+	   if(pthread_create(&dnsserver1,NULL,th_socket_gethostbyname,data))
+           {      
+            dbg("[%s] -- [%d] -- pthread_create failed\r\n", __FUNCTION__, __LINE__);   
+                  DNS64SERVERNUM--;
+            }
+	   data->_dnsserver = "2001:67c:27e4:15::6411";
+           if(pthread_create(&dnsserver2,NULL,th_socket_gethostbyname,data))
+           {      
+            dbg("[%s] -- [%d] -- pthread_create failed\r\n", __FUNCTION__, __LINE__);   
+               DNS64SERVERNUM--;
+            }
+           data->_dnsserver = "2001:67c:27e4::60";
+           if(pthread_create(&dnsserver3,NULL,th_socket_gethostbyname,data))
+           {      
+            dbg("[%s] -- [%d] -- pthread_create failed\r\n", __FUNCTION__, __LINE__);   
+                 DNS64SERVERNUM--;
+            }
+    
+   do
+  {     
+     
+       if(_ipinfo->size>0) 
+        {
+         dbg("[%s] -- [%d] -- _ipinfo->size[%d]\r\n", __FUNCTION__, __LINE__,_ipinfo->size); 
+         
+        free(data); 
+         
+        return 0; 
+        }
+       usleep(1);
+      
+       if(dnsquery_failcount==DNS64SERVERNUM)  
+      { 
+      dbg("[%s] -- [%d] -- pthreadNUM[%d]==dnsquery_failcount\r\n", __FUNCTION__, __LINE__,dnsquery_failcount); 
+      free(data);
+      return -1;
+       }
+    
+  }while(1);    
 }
 
-
-
-int getaddrinfo_v6(const char* _host, struct socket_ipinfo_t* _ipinfo, int _timeout /*ms*/,char *_dnsserver) 
-{    
-
-       if (NULL == _host)
+/**
+ *函数名:    getaddrinfo_v6（外部借口调用）
+ *功能: 输入域名，可得到该域名下所对应的IP地址列表保存在结构体_ipinfo中
+ *输入:       _host：输入的要查询的主机域名
+ *输入:       _timeout：设置查询超时时间，单位为毫秒
+ *输出:        _ipinfo为要输出的ip信息结构体
+ *返回值:          当返回-1表示查询失败，当返回0则表示查询成功
+ *
+ */
+int getaddrinfo_v6(const char* _host, struct socket_ipinfo_t* _ipinfo, int _timeout /*ms*/) 
+{   
+   dbg("[%s] -- [%d] -- getaddrinfo_v6 enter\r\n", __FUNCTION__, __LINE__);
+      if (NULL == _host) 
     {
         dbg("[%s] -- [%d] -- NULL == _host \r\n", __FUNCTION__, __LINE__);
         return -1;
@@ -323,20 +377,21 @@ int getaddrinfo_v6(const char* _host, struct socket_ipinfo_t* _ipinfo, int _time
     char host[64];
     memset(host, 0, sizeof(host));
     strncpy(host, _host, strlen(_host));
+    _ipinfo->size = 0;
     if(isValidIpv4Address(host))//输入的是ipv4地址 
     {  
         struct in_addr _v4_addr = {0};
         inet_pton(AF_INET,host,&_v4_addr);
-        char ipv4_host[20]= "ipv4only.arpa";
-        if(socket_gethostbyname(ipv4_host,_ipinfo, _timeout, _dnsserver)!=0) 
+        char ipv4_host[20]="ipv4only.arpa";
+        if(th_gethostbyname(ipv4_host,_ipinfo, _timeout)!=0) 
         {
             dbg("[%s] -- [%d] -- socket_gethostbyname failed\r\n", __FUNCTION__, __LINE__);
             return -1; 
         }
-       
-        //_ipinfo->size=1; 
+        _ipinfo->size=1; 
         if(IsNat64AddrValid(&(_ipinfo->v6_addr[0]))==true) {
             ReplaceNat64WithV4IP((&_ipinfo->v6_addr[0]) , &_v4_addr);
+   
             return 0;
         } else {
             dbg("[%s] -- [%d] -- isValidIpv4Address failed\r\n", __FUNCTION__, __LINE__);
@@ -344,15 +399,14 @@ int getaddrinfo_v6(const char* _host, struct socket_ipinfo_t* _ipinfo, int _time
         }
     } 
     else
-    {  
-        re=socket_gethostbyname(host,_ipinfo,_timeout,_dnsserver);
+    {
+        re=th_gethostbyname(host,_ipinfo,_timeout);
         if(-1 == re) {
             dbg("[%s] -- [%d] -- socket_gethostbyname failed\r\n", __FUNCTION__, __LINE__);
             re=getaddrinfo_api(host,_ipinfo);
         }
     }
-
-    //printf("re : %d\r\n",re); 
+    //dbg("re : %d\r\n",re); 
     return re;
     /*getaddrinfo*/
 }
@@ -367,8 +421,8 @@ int getaddrinfo_v6(const char* _host, struct socket_ipinfo_t* _ipinfo, int _time
  *
  */
 int socket_gethostbyname(char* _host, struct socket_ipinfo_t* _ipinfo, int _timeout /*ms*/, const char* _dnsserver) {
-
-
+   dbg("[%s] -- [%d] -- socket_gethostbyname enter\r\n", __FUNCTION__, __LINE__);
+    
     if(NULL==_dnsserver) {
         dbg("[%s] -- [%d] -- NULL==_dnsserver \r\n", __FUNCTION__, __LINE__);
         return -1;
@@ -381,12 +435,12 @@ int socket_gethostbyname(char* _host, struct socket_ipinfo_t* _ipinfo, int _time
         dbg("[%s] -- [%d] -- socket failed\r\n", __FUNCTION__, __LINE__);
         return -1;  
     }  
-    //printf("sockfd:%d\n",sockfd);
+    //dbg("sockfd:%d\n",sockfd);
     struct sockaddr_in6 dest = {0};
     dest.sin6_family = AF_INET6;
     inet_pton(AF_INET6, _dnsserver, &(dest.sin6_addr)); 
     dest.sin6_port = htons(DNS_PORT);
-    struct RES_RECORD answers[SOCKET_MAX_IP_COUNT]; //the replies from the DNS server
+    struct RES_RECORD answers[SOCKET_MAX_IP_COUNT];  // the replies from the DNS server
     memset(answers, 0, sizeof(struct RES_RECORD)*SOCKET_MAX_IP_COUNT);
     int ret = -1;
     do {
@@ -399,11 +453,12 @@ int socket_gethostbyname(char* _host, struct socket_ipinfo_t* _ipinfo, int _time
         unsigned long send_packlen = sizeof(struct DNS_HEADER) + (strlen((const char*)qname) + 1) + sizeof(struct QUESTION);
         int sendfd;
         struct sockaddr_in6 recv_src = {0};
+
         int recvPacketLen = 0;
         for(int i=0;i<3;i++)
         {
             sendfd = sendto(sockfd, (char*)send_buf, send_packlen, 0, (struct sockaddr*)&dest, sizeof(dest));
-            //printf("sendPacketlen:%d\n",sendfd);
+            //dbg("sendPacketlen:%d\n",sendfd);
             if (sendfd==-1)
             {  
                 dbg("[%s] -- [%d] -- sendto failed\r\n", __FUNCTION__, __LINE__);
@@ -412,7 +467,6 @@ int socket_gethostbyname(char* _host, struct socket_ipinfo_t* _ipinfo, int _time
             socklen_t recv_src_len = sizeof(recv_src);
             if ((recvPacketLen = RecvWithinTime(sockfd, (char*)recv_buf, BUF_LEN, (struct sockaddr*)&recv_src, &recv_src_len, _timeout / 1000, (_timeout % 1000) * 1000)) > -1) 
             {
-
                 break;
             }
             else {  
@@ -420,48 +474,46 @@ int socket_gethostbyname(char* _host, struct socket_ipinfo_t* _ipinfo, int _time
             }
         }
 
-        //printf("recvPacketLen:%d\n",recvPacketLen);
         // move ahead of the dns header and the query field
         unsigned char* reader = &recv_buf[sizeof(struct DNS_HEADER) + (strlen((const char*)qname) + 1) + sizeof(struct QUESTION)];
         dns = (struct DNS_HEADER*)recv_buf;   // 指向recv_buf的header
         ReadRecvAnswer(recv_buf, dns, reader, answers);
 
         // 把查询到的IP放入返回参数_ipinfo结构体中
-   pthread_mutex_lock(&mutex);
         int answer_count = min(SOCKET_MAX_IP_COUNT, (int)ntohs(dns->ans_count));
-        _ipinfo->size = 0;
-
+        pthread_mutex_lock(&dnsquery_mutex); 
         for (int i = 0; i < answer_count; ++i) {
             if (AAAA == ntohs(answers[i].resource->type)) {  // IPv6 address
-                for(int p=0;p<16;p++)
+               for(int p=0;p<16;p++)
                 {  
                     _ipinfo->v6_addr[_ipinfo->size].s6_addr[p]=answers[i].rdata[p];
                 }
-
-                _ipinfo->size++;
+                _ipinfo->size++;          
+                   //pthread_mutex_unlock(&mutex); 
             }
         }
+          
 
         if (0 >= _ipinfo->size) {  
-
+          pthread_mutex_unlock(&dnsquery_mutex);
+          dbg("[%s] -- [%d] -- _ipinfo->size <= 0\r\n", __FUNCTION__, __LINE__);
             break;
-        }
-        else {
-            dbg("[%s] -- [%d] -- _ipinfo->size <= 0\r\n", __FUNCTION__, __LINE__);
-        }
-
+        
+        }       
         ret = 0;
+       
     } while (false);
-     pthread_mutex_unlock(&mutex);
+
     FreeAll(answers);
     close(sockfd);
-
+   dbg("[%s] -- [%d] -- socket_gethostbyname out\r\n", __FUNCTION__, __LINE__);
     return ret;  //* 查询DNS服务器超时
+
 }
 
 
 
-int isValidIpv4Address(char* _ipaddress) {
+static int isValidIpv4Address(char* _ipaddress) {
    
     struct sockaddr_in sa;
     int result =inet_pton(AF_INET, _ipaddress, (void*) & (sa.sin_addr));
@@ -487,8 +539,10 @@ void ReadRecvAnswer(unsigned char* _buf, struct DNS_HEADER* _dns, unsigned char*
     for (i = 0; i < answer_count; i++) {
         _answers[i].name = ReadName(_reader, _buf, &stop);
         _reader = _reader + stop;
+
         _answers[i].resource = (struct R_DATA*)(_reader);
         _reader = _reader + sizeof(struct R_DATA);//指针偏移
+
        // if (ntohs(_answers[i].resource->type) == 1) {  // if its an ipv4 address
          if (ntohs(_answers[i].resource->type) == AAAA) {  // if its an ipv6 address
            _answers[i].rdata = (unsigned char*)malloc(ntohs(_answers[i].resource->data_len));
@@ -497,10 +551,12 @@ void ReadRecvAnswer(unsigned char* _buf, struct DNS_HEADER* _dns, unsigned char*
             {
                 return;
             }
+
             for (j = 0 ; j < ntohs(_answers[i].resource->data_len) ; j++)
-		        { 
-                  _answers[i].rdata[j] = _reader[j];
-                        }
+                { _answers[i].rdata[j] = _reader[j];
+                  
+             }
+            
             _answers[i].rdata[ntohs(_answers[i].resource->data_len)] = '\0';
             _reader = _reader + ntohs(_answers[i].resource->data_len);
         } else {
@@ -516,6 +572,7 @@ unsigned char* ReadName(unsigned char* _reader, unsigned char* _buffer, int* _co
     const unsigned int INIT_SIZE = 256, INCREMENT = 64;
     int timesForRealloc = 0;
     int i , j;
+
     *_count = 1;
     name   = (unsigned char*)malloc(INIT_SIZE);
 
@@ -523,6 +580,7 @@ unsigned char* ReadName(unsigned char* _reader, unsigned char* _buffer, int* _co
         
         return NULL;
     }
+
     name[0] = '\0';
 
     // read the names in 3www6google3com format
@@ -535,9 +593,12 @@ unsigned char* ReadName(unsigned char* _reader, unsigned char* _buffer, int* _co
             name[p++] = *_reader;
 
         _reader = _reader + 1;
+
         if (jumped == 0) *_count = *_count + 1;  // if we have not jumped to another location then we can count up
+
         if (*_count >= (int)(INIT_SIZE + INCREMENT * timesForRealloc)) {
             timesForRealloc++;
+
             unsigned char* more_name = NULL;
             more_name = (unsigned char*)realloc(name, (INIT_SIZE + INCREMENT * timesForRealloc));
 
@@ -546,9 +607,11 @@ unsigned char* ReadName(unsigned char* _reader, unsigned char* _buffer, int* _co
                 free(name);
                 return NULL;
             }
+
             name = more_name;
         }
     }
+
     name[p] = '\0';  // string complete
 
     if (jumped == 1) *_count = *_count + 1;  // number of steps we actually moved forward in the packet
@@ -582,25 +645,27 @@ void ChangetoDnsNameFormat(unsigned char* _qname, char* _hostname) {
             for (; lock < i; lock++) {
                 *_qname++ = host[lock];
             }
+
             lock++;
         }
     }
+
     *_qname++ = '\0';
 }
-void PrepareDnsQueryPacket(unsigned char* _buf, struct DNS_HEADER* _dns, unsigned char* _qname,  char* _host) {
 
+void PrepareDnsQueryPacket(unsigned char* _buf, struct DNS_HEADER* _dns, unsigned char* _qname,  char* _host) {
     struct QUESTION*  qinfo = NULL;
     // Set the DNS structure to standard queries
     _dns->id = getpid();
     _dns->qr = 0;      // This is a query
     _dns->opcode = 0;  // This is a standard query
-    _dns->aa = 0;     // Not Authoritative
+    _dns->aa = 0;      // Not Authoritative
     _dns->tc = 0;      // This message is not truncated
     _dns->rd = 1;      // Recursion Desired
     _dns->ra = 0;      // Recursion not available!
     _dns->z  = 0;
     _dns->ad = 0;
-    _dns->cd = 0; 
+    _dns->cd = 0;
     _dns->rcode = 0;
     _dns->q_count = htons(1);   // we have only 1 question
     _dns->ans_count  = 0;
@@ -614,19 +679,23 @@ void PrepareDnsQueryPacket(unsigned char* _buf, struct DNS_HEADER* _dns, unsigne
     qinfo->qclass = htons(1);  // its internet
 }
 
-int RecvWithinTime(int _fd, char* _buf, size_t _buf_n, struct sockaddr* _addr, socklen_t* _len, unsigned int _sec, unsigned _usec) {
+static  int RecvWithinTime(int _fd, char* _buf, size_t _buf_n, struct sockaddr* _addr, socklen_t* _len, unsigned int _sec, unsigned _usec) {
     struct timeval tv;
     fd_set readfds, exceptfds;
     int n = 0;
+
     FD_ZERO(&readfds);
     FD_SET(_fd, &readfds);
     FD_ZERO(&exceptfds);
     FD_SET(_fd, &exceptfds);
+
     tv.tv_sec = _sec;
     tv.tv_usec = _usec;
+
     int ret = -1;
 label:
     ret = select(_fd + 1, &readfds, NULL, &exceptfds, &tv);
+
     if (-1 == ret) {
         if (EINTR == errno) {
             // select被信号中断 handler
@@ -637,16 +706,19 @@ label:
             goto label;
         }
     }
+
     if (FD_ISSET(_fd, &exceptfds)) {
         // socket异常处理
         return -1;
     }
+
     if (FD_ISSET(_fd, &readfds)) {
         if ((n = (int)recvfrom(_fd, _buf, _buf_n, 0, _addr, _len)) >= 0) {
             return n;
         }
     }
-    return -1;//超时或者select失败
+
+    return -1;  // 超时或者select失败
 }
 
 
